@@ -26,6 +26,13 @@ std::mt19937 rng(std::random_device{}());
 // Generate a random number between 1 and 100
 std::uniform_int_distribution<int> dist(1, 100);
 
+static constexpr int kMaxLineLength = 1024;
+static constexpr int kPortNumber = 369;
+
+static constexpr char kWinMessage[] = "You won!\n";
+static constexpr char kLowMessage[] = "Your guess is too low.\n";
+static constexpr char kHighMessage[] = "Your guess is too high.\n";
+
 // Represents a socket that can be used to send and receive data
 class Socket
 {
