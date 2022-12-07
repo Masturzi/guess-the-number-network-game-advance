@@ -9,6 +9,7 @@
 #include <unistd.h>
 #include <sys/socket.h>
 #include <sys/types.h>
+#include <future>
 
 // An advance version of my network game where the server generates 
 // a random number and the client
@@ -32,6 +33,33 @@ static constexpr int kPortNumber = 369;
 static constexpr char kWinMessage[] = "You won!\n";
 static constexpr char kLowMessage[] = "Your guess is too low.\n";
 static constexpr char kHighMessage[] = "Your guess is too high.\n";
+
+// Function to asynchronously read data from the given socket
+std::future<std::string> AsyncRead(int sockfd)
+{
+    return std::async(std::launch::async, [sockfd]()
+    {
+        array<char, kMaxLineLength> buffer;
+        memset(buffer.data(), 0, buffer.size());
+        if (read(sockfd, buffer.data(), buffer.size()) == -1)
+        {
+            throw std::runtime_error(strerror(errno));
+        }
+        return std::string(buffer.data());
+    });
+}
+
+// Function to asynchronously write data to the given socket
+std::future<void> AsyncWrite(int sockfd, const std::string& data)
+{
+    return std::async(std::launch::async, [sockfd, data]()
+    {
+        if (write(sockfd, data.c_str(), data.size()) == -1)
+        {
+            throw std::runtime_error(strerror(errno));
+        }
+    });
+}
 
 int main()
 {
@@ -98,38 +126,40 @@ int main()
         }
 
         // Send the guess to the server
-        if (write(sockfd, buffer.data(), buffer.size()) == -1)
+        auto write_future = AsyncWrite(sockfd, buffer.data());
+        try
         {
-            cout << "Failed to send guess to server: " << strerror(errno) << endl;
+            write_future.get();
+        }
+        catch (const std::exception& e)
+        {
+            cout << "Failed to send guess to server: " << e.what() << endl;
             return 1;
         }
 
         // Read the server's response
-        memset(buffer.data(), 0, buffer.size());
-        if (read(sockfd, buffer.data(), buffer.size()) == -1)
+        auto read_future = AsyncRead(sockfd);
+        try
         {
-            cout << "Failed to read from server: " << strerror(errno) << endl;
-            return 1;
-        }
+            std::string response = read_future.get();
 
-        // Check the server's response
-        std::string response(buffer.data());
-        if (response == kWinMessage)
-        {
-            // If the player wins, print the win message and exit the loop
-            cout << response;
-            break;
+            // Check the server's response
+            if (response == kWinMessage)
+            {
+                cout << response;
+                break;
+            }
+            else
+            {
+                cout << response;
+            }
         }
-        else
+        catch (const std::exception& e)
         {
-            // Otherwise, print the server's response
-            cout << response;
+            cout << "Failed to read from server: " << e.what() << endl;
+            return 1;
         }
     }
 
-    // Close the socket
-    close(sockfd);
-
     return 0;
 }
-
