@@ -56,6 +56,56 @@ bool IsValidInteger(const std::string& s)
     return true;
 }
 
+// Represents a socket that can be used to send and receive data
+class Socket
+{
+public:
+    // Constructs a socket from a file descriptor
+    Socket(int fd) : fd_(fd) {}
+
+    // Receives data from the socket into a buffer
+    std::string Receive(size_t size)
+    {
+        std::array<char, kMaxLineLength> buffer;
+        ssize_t num_bytes = recv(fd_, buffer.data(), buffer.size(), 0);
+        if (num_bytes == -1)
+        {
+            throw std::runtime_error(strerror(errno));
+        }
+        return std::string(buffer.data(), num_bytes);
+    }
+
+    // Sends data from a buffer to the socket
+    void Send(const std::string& data)
+    {
+        ssize_t num_bytes = send(fd_, data.data(), data.size(), 0);
+        if (num_bytes == -1)
+        {
+            throw std::runtime_error(strerror(errno));
+        }
+    }
+
+private:
+    int fd_;
+};
+
+// Asynchronously listens for incoming connections on the given socket
+std::future<std::unique_ptr<Socket>> Listen(int sockfd)
+{
+    return std::async(std::launch::async, [sockfd]()
+    {
+        sockaddr_in client_addr;
+        socklen_t client_addr_len = sizeof(client_addr);
+        int clientfd = accept(sockfd, reinterpret_cast<sockaddr*>(&client_addr), &client_addr_len);
+        if (clientfd == -1)
+        {
+            throw std::runtime_error(strerror(errno));
+        }
+
+        return std::make_unique<Socket>(clientfd);
+    });
+}
+
 int main()
 {
     // Initialize the random number generator
@@ -89,103 +139,75 @@ int main()
         return 1;
     }
 
-    // Accept an incoming connection
-    sockaddr_in client_addr;
-    socklen_t client_addr_len = sizeof(client_addr);
-    int clientfd = accept(sockfd, reinterpret_cast<sockaddr*>(&client_addr), &client_addr_len);
-    if (clientfd == -1)
-    {
-        cout << "Failed to accept connection: " << strerror(errno) << endl;
-        return 1;
-    }
-
-    // Get the client's IP address and port
-    char client_ip_str[INET_ADDRSTRLEN];
-    if (inet_ntop(AF_INET, &client_addr.sin_addr, client_ip_str, sizeof(client_ip_str)) == nullptr)
-    {
-        cout << "Failed to convert client IP address to string: " << strerror(errno) << endl;
-        return 1;
-    }
-    int client_port = ntohs(client_addr.sin_port);
-
-    // Print a message indicating that a new client has connected
-    cout << "New client connected from " << client_ip_str << ":" << client_port << endl;
-
-    // Send the welcome message to the client
-    if (write(clientfd, kWelcomeMessage, sizeof(kWelcomeMessage)) == -1)
-    {
-        cout << "Failed to send welcome message to client: " << strerror(errno) << endl;
-        return 1;
-    }
-
-    // Loop until the client guesses the number
     while (true)
     {
-        // Read a guess from the client
-        array<char, kMaxLineLength> buffer;
-        if (read(clientfd, buffer.data(), buffer.size()) == -1)
+        // Accept an incoming connection
+        std::unique_ptr<Socket> client = Listen(sockfd).get();
+
+        // Get the client's IP address and port
+        sockaddr_in client_addr;
+        socklen_t client_addr_len = sizeof(client_addr);
+        if (getpeername(client->GetFd(), reinterpret_cast<sockaddr*>(&client_addr), &client_addr_len) == -1)
         {
-            cout << "Failed to read from client: " << strerror(errno) << endl;
+            cout << "Failed to get client IP address: " << strerror(errno) << endl;
             return 1;
         }
 
-        // Remove the newline character from the guess
-        auto newline = std::find(buffer.begin(), buffer.end(), '\n');
-        if (newline != buffer.end())
+        char client_ip_str[INET_ADDRSTRLEN];
+        if (inet_ntop(AF_INET, &client_addr.sin_addr, client_ip_str, sizeof(client_ip_str)) == nullptr)
         {
-            *newline = '\0';
+            cout << "Failed to convert client IP address to string: " << strerror(errno) << endl;
+            return 1
         }
 
-        // Check if the guess is a valid integer
-        std::string guess_str(buffer.data());
-        if (!IsValidInteger(guess_str))
-        {
-            // If the guess is not a valid integer, ignore it
-            continue;
-        }
+        int client_port = ntohs(client_addr.sin_port);
 
-        // Convert the guess to an integer
-        int guess = std::stoi(guess_str);
+        cout << "Accepted connection from " << client_ip_str << ":" << client_port << endl;
 
-        // Check if the guess is correct
-        if (guess == number)
+        // Send the welcome message to the client
+        client->Send(kWelcomeMessage);
+
+        // Play the guessing game with the client
+        while (true)
         {
-            // Send a message to the client indicating that they won
-            if (write(clientfd, kWinMessage, sizeof(kWinMessage)) == -1)
+            // Receive a guess from the client
+            std::string line = client->Receive(kMaxLineLength);
+
+            // Check if the client has disconnected
+            if (line.empty())
             {
-                cout << "Failed to send win message to client: " << strerror(errno) << endl;
-                return 1;
+                cout << "Client disconnected" << endl;
+                break;
             }
 
-            // Close the client socket
-            close(clientfd);
-
-            // Exit the loop
-            break;
-        }
-        else if (guess < number)
-        {
-            // Send a message to the client indicating that their guess is too low
-            if (write(clientfd, kLowMessage, sizeof(kLowMessage)) == -1)
+            // Check if the line is a valid integer
+            if (!IsValidInteger(line))
             {
-                cout << "Failed to send low message to client: " << strerror(errno) << endl;
-                return 1;
+                cout << "Received invalid input from client: " << line << endl;
+                continue;
             }
-        }
-        else
-        {
-            // Send a message to the client indicating that their guess is too high
-            if (write(clientfd, kHighMessage, sizeof(kHighMessage)) == -1)
+
+            // Convert the line to an integer
+            int guess = std::stoi(line);
+
+            // Check if the guess is correct
+            if (guess == number)
             {
-                cout << "Failed to send high message to client: " << strerror(errno) << endl;
-                return 1;
+                client->Send(kWinMessage);
+                break;
+            }
+
+            // Send a message to the client depending on whether their guess was too low or too high
+            if (guess < number)
+            {
+                client->Send(kLowMessage);
+            }
+            else
+            {
+                client->Send(kHighMessage);
             }
         }
     }
 
-    // Close the server socket
-    close(sockfd);
-
     return 0;
 }
-
