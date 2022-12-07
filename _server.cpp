@@ -10,6 +10,8 @@
 #include <unistd.h>
 #include <sys/socket.h>
 #include <sys/types.h>
+#include <future>
+#include <memory>
 
 // An advance version of my network game where the server generates 
 // a random number and the client
@@ -18,43 +20,11 @@
 // Author: Don P
 // Date: December 6, 2022
 
-using std::mt19937;
-using std::uniform_int_distribution;
-using std::ostream;
-using std::cout;
-using std::endl;
-using std::array;
-using std::strerror;
-using std::memset;
-using std::setw;
+// Initialize the random number generator
+std::mt19937 rng(std::random_device{}());
 
-static constexpr int kListenQueueSize = 5;
-static constexpr int kMaxLineLength = 1024;
-static constexpr int kPortNumber = 369;
-
-static constexpr char kWelcomeMessage[] = "Welcome to the guessing game! I'm thinking of a number between 1 and 100. Can you guess it?\n";
-static constexpr char kWinMessage[] = "You won!\n";
-static constexpr char kLowMessage[] = "Your guess is too low.\n";
-static constexpr char kHighMessage[] = "Your guess is too high.\n";
-
-// Function to check if the given string represents a valid integer
-bool IsValidInteger(const std::string& s)
-{
-    // Check if the string is empty
-    if (s.empty())
-    {
-        return false;
-    }
-
-    // Check if the string contains only digits
-    if (s.find_first_not_of("0123456789") != std::string::npos)
-    {
-        return false;
-    }
-
-    // The string is a valid integer
-    return true;
-}
+// Generate a random number between 1 and 100
+std::uniform_int_distribution<int> dist(1, 100);
 
 // Represents a socket that can be used to send and receive data
 class Socket
@@ -106,108 +76,122 @@ std::future<std::unique_ptr<Socket>> Listen(int sockfd)
     });
 }
 
+// Function to check if the given string represents a valid integer
+bool IsValidInteger(const std::string& s)
+{
+    // Check if the string is empty
+    if (s.empty())
+    {
+        return false;
+    }
+
+    // Check if the string contains only digits
+    if (s.find_first_not_of("0123456789") != std::string::npos)
+{
+        return false;
+    }
+
+    // The string is a valid integer
+    return true;
+}
+
 int main()
 {
-    // Initialize the random number generator
-    mt19937 rng(std::random_device{}());
-    uniform_int_distribution<int> dist(1, 100);
-    int number = dist(rng);
+    // Generate the random number
+    const int number = dist(rng);
 
     // Create a socket
-    int sockfd = socket(AF_INET, SOCK_STREAM, 0);
+    const int sockfd = socket(AF_INET, SOCK_STREAM, 0);
     if (sockfd == -1)
     {
-        cout << "Failed to create socket: " << strerror(errno) << endl;
+        std::cout << "Failed to create socket: " << strerror(errno) << std::endl;
         return 1;
     }
 
-    // Bind the socket to an IP address and port
+    // Bind the socket to the given port number
     sockaddr_in addr;
+    memset(&addr, 0, sizeof(addr));
     addr.sin_family = AF_INET;
+    addr.sin_addr.s_addr = htonl(INADDR_ANY);
     addr.sin_port = htons(kPortNumber);
-    addr.sin_addr.s_addr = INADDR_ANY;
     if (bind(sockfd, reinterpret_cast<sockaddr*>(&addr), sizeof(addr)) == -1)
     {
-        cout << "Failed to bind socket: " << strerror(errno) << endl;
+        std::cout << "Failed to bind socket: " << strerror(errno) << std::endl;
         return 1;
     }
 
-    // Listen for incoming connections
+    // Listen for incoming connections on the socket
     if (listen(sockfd, kListenQueueSize) == -1)
     {
-        cout << "Failed to listen on socket: " << strerror(errno) << endl;
+        std::cout << "Failed to listen on socket: " << strerror(errno) << std::endl;
         return 1;
     }
 
+    std::cout << "Listening for incoming connections on port " << kPortNumber << std::endl;
+
+    // Accept incoming connections and handle them asynchronously
     while (true)
     {
-        // Accept an incoming connection
-        std::unique_ptr<Socket> client = Listen(sockfd).get();
-
-        // Get the client's IP address and port
-        sockaddr_in client_addr;
-        socklen_t client_addr_len = sizeof(client_addr);
-        if (getpeername(client->GetFd(), reinterpret_cast<sockaddr*>(&client_addr), &client_addr_len) == -1)
-        {
-            cout << "Failed to get client IP address: " << strerror(errno) << endl;
-            return 1;
-        }
-
-        char client_ip_str[INET_ADDRSTRLEN];
-        if (inet_ntop(AF_INET, &client_addr.sin_addr, client_ip_str, sizeof(client_ip_str)) == nullptr)
-        {
-            cout << "Failed to convert client IP address to string: " << strerror(errno) << endl;
-            return 1
-        }
-
-        int client_port = ntohs(client_addr.sin_port);
-
-        cout << "Accepted connection from " << client_ip_str << ":" << client_port << endl;
+        // Wait for a client to connect
+        const auto client_socket = Listen(sockfd).get();
 
         // Send the welcome message to the client
-        client->Send(kWelcomeMessage);
+        client_socket->Send(kWelcomeMessage);
 
-        // Play the guessing game with the client
+        // Keep track of the number of guesses
+        int num_guesses = 0;
+
+        // Keep playing until the client wins or quits
         while (true)
         {
-            // Receive a guess from the client
-            std::string line = client->Receive(kMaxLineLength);
+            // Receive a line of input from the client
+            const auto user_input = client_socket->Receive(kMaxLineLength);
 
-            // Check if the client has disconnected
-            if (line.empty())
+            // Check if the user entered "QUIT"
+            if (user_input == "QUIT")
             {
-                cout << "Client disconnected" << endl;
                 break;
             }
 
-            // Check if the line is a valid integer
-            if (!IsValidInteger(line))
+            // Check if the user entered a valid integer
+            if (!IsValidInteger(user_input))
             {
-                cout << "Received invalid input from client: " << line << endl;
+                client_socket->Send("Invalid input. Please enter a valid integer.\n");
                 continue;
             }
 
-            // Convert the line to an integer
-            int guess = std::stoi(line);
+            // Convert the input string to an integer
+            const int guess = std::stoi(user_input);
+
+            // Increment the number of guesses
+            ++num_guesses;
 
             // Check if the guess is correct
             if (guess == number)
             {
-                client->Send(kWinMessage);
+                // Send the win message to the client
+                client_socket->Send(kWinMessage);
+
+                // Print a message to the server console
+                std::cout << "Client won in " << num_guesses << " guesses.\n";
                 break;
             }
-
-            // Send a message to the client depending on whether their guess was too low or too high
-            if (guess < number)
+            else if (guess < number)
             {
-                client->Send(kLowMessage);
+                // Send the low message to the client
+                client_socket->Send(kLowMessage);
             }
             else
             {
-                client->Send(kHighMessage);
+                // Send the high message to the client
+                client_socket->Send(kHighMessage);
             }
         }
     }
 
+    // Close the socket
+    close(sockfd);
+
     return 0;
 }
+
